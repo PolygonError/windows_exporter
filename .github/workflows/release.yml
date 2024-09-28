@@ -17,9 +17,12 @@ permissions:
 
 env:
   VERSION_PROMU: '0.14.0'
-  VERSION_CONTAINERD: '1.7.21'
-  VERSION_BUILDKIT: '0.15.2'
-  VERSION_BUILDX: '0.16.2'
+  # https://github.com/containerd/containerd/releases/latest
+  VERSION_CONTAINERD: '1.7.22'
+  # https://github.com/moby/buildkit/releases/latest
+  VERSION_BUILDKIT: '0.16.0'
+  # https://github.com/docker/buildx/releases/latest
+  VERSION_BUILDX: '0.17.1'
 
 jobs:
   build:
@@ -36,24 +39,34 @@ jobs:
       # https://github.com/pl4nty/Windows-Containers/blob/Main/helpful_tools/Install-BuildKit-GitHubActions/workflow.yaml
       - name: Setup containerd
         run: |
-          curl.exe -L https://github.com/containerd/containerd/releases/download/v${{ env.VERSION_CONTAINERD }}/containerd-${{ env.VERSION_CONTAINERD }}-windows-amd64.tar.gz -o containerd.tar.gz
+          curl.exe -sSfL https://github.com/containerd/containerd/releases/download/v${{ env.VERSION_CONTAINERD }}/containerd-${{ env.VERSION_CONTAINERD }}-windows-amd64.tar.gz -o containerd.tar.gz
           tar.exe xvf containerd.tar.gz
-          .\bin\containerd.exe --register-service
+          bin\containerd.exe config default | Out-File config.toml -Encoding ascii
+          ((Get-Content -path config.toml -Raw) -replace 'C:\\\\ProgramData\\\\containerd', ((Get-Location) -replace '\\', '\\')) | Set-Content -Path config.toml
+          ((Get-Content -path config.toml -Raw) -replace 'C:\\\\Program Files\\\\containerd', ((Get-Location) -replace '\\', '\\')) | Set-Content -Path config.toml
+
+          .\bin\containerd.exe --register-service -c "$(Get-Location)\config.toml"
           Start-Service containerd
       - name: Setup BuildKit
         run: |
-          curl.exe -L https://github.com/moby/buildkit/releases/download/v${{ env.VERSION_BUILDKIT }}/buildkit-v${{ env.VERSION_BUILDKIT }}.windows-amd64.tar.gz -o buildkit.tar.gz
+          curl.exe -sSfL https://github.com/moby/buildkit/releases/download/v${{ env.VERSION_BUILDKIT }}/buildkit-v${{ env.VERSION_BUILDKIT }}.windows-amd64.tar.gz -o buildkit.tar.gz
           tar.exe xvf buildkit.tar.gz
 
-          .\bin\buildkitd.exe --register-service
+          mkdir C:\ProgramData\buildkitd\
+          mkdir C:\ProgramData\buildkitd\.buildstate\
+
+          .\bin\buildkitd.exe --register-service --debug --containerd-worker=true --service-name buildkitd
           Start-Service buildkitd
       - name: Setup Docker Buildx
         run: |
-          curl.exe -L https://github.com/docker/buildx/releases/download/v${{ env.VERSION_BUILDX }}/buildx-v${{ env.VERSION_BUILDX }}.windows-amd64.exe -o $env:ProgramData\Docker\cli-plugins\docker-buildx.exe
+          curl.exe -sSfL https://github.com/docker/buildx/releases/download/v${{ env.VERSION_BUILDX }}/buildx-v${{ env.VERSION_BUILDX }}.windows-amd64.exe -o $env:ProgramData\Docker\cli-plugins\docker-buildx.exe
       - uses: docker/setup-buildx-action@v3
         with:
           driver: remote
           endpoint: npipe:////./pipe/buildkitd
+          driver-opts: default-load=false
+
+
       - name: Install WiX
         run: dotnet tool install --global wix
 
@@ -164,3 +177,7 @@ jobs:
           $TagName = $env:GITHUB_REF -replace 'refs/tags/', ''
           Get-ChildItem -Path output\* -Include @('windows_exporter*.msi', 'windows_exporter*.exe', 'sha256sums.txt') | Foreach-Object {gh release upload $TagName $_}
           make push-all
+
+      - run: |
+          ./bin/buildctl.exe build --frontend=dockerfile.v0 --local context=. --local dockerfile=. --output type=image,name=ghcr.io/prometheus-community/windows-exporter:test-hostprocess,push=true --opt build-arg:BASE=mcr.microsoft.com/oss/kubernetes/windows-host-process-containers-base-image:v1.0.0
+          docker buildx build --sbom=false --provenance=false --no-cache --push --build-arg=BASE=mcr.microsoft.com/oss/kubernetes/windows-host-process-containers-base-image:v1.0.0 -f Dockerfile -t ghcr.io/prometheus-community/windows-exporter:test-hostprocess .
